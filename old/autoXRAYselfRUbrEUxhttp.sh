@@ -6,12 +6,10 @@ RED='\033[1;31m'
 YEL='\033[1;33m'
 NC='\033[0m' # No Color
 
-echo -e "${GRN}Версия: 222 ${NC}"
-
 [[ $EUID -eq 0 ]] || { echo -e "${RED}❌ скрипту нужны root права ${NC}"; exit 1; }
 
 DOMAIN=$1
-shift # Сдвигаем аргументы, теперь все оставшиеся аргументы ($@) — это vless ссылки
+shift
 VLESS_URLS=("$@")
 
 if [ -z "$DOMAIN" ]; then
@@ -117,6 +115,35 @@ if [ "$LOCAL_IP" != "$DNS_IP" ]; then
     echo -e "${YEL}Продолжение выполнения скрипта...${NC}"
 fi
 
+# === ВОПРОСЫ ПОЛЬЗОВАТЕЛЮ ===
+read -p "$(echo -e "\n${YEL}Устанавливать MTProxy для Telegram? (y/n, по умолчанию y): ${NC}")" choice_mtp
+choice_mtp=${choice_mtp:-y}
+if [[ "$choice_mtp" =~ ^[Yy]$ ]]; then
+    TARGET_MTP="127.0.0.1:500"
+    INSTALL_MTP=true
+else
+    TARGET_MTP="/dev/shm/nginx.sock"
+    INSTALL_MTP=false
+fi
+
+echo -e "\n${YEL}Выберите TLS fingerprint для маскировки трафика:${NC}"
+echo "1) chrome    3) safari   5) android   7) 360"
+echo "2) firefox   4) ios      6) edge      8) qq"
+read -p "Введите номер [1-8] (по умолчанию 2 - firefox): " fp_choice
+
+case $fp_choice in
+    1) fpBro="chrome" ;;
+    2) fpBro="firefox" ;;
+    3) fpBro="safari" ;;
+    4) fpBro="ios" ;;
+    5) fpBro="android" ;;
+    6) fpBro="edge" ;;
+    7) fpBro="360" ;;
+    8) fpBro="qq" ;;
+    *) fpBro="firefox" ;;
+esac
+# ============================
+
 # Включаем BBR
 bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
 if [ "$bbr" = "bbr" ]; then
@@ -197,20 +224,46 @@ fi
 
 path_subpage=$(openssl rand -base64 15 | tr -dc 'A-Za-z0-9' | head -c 20)
 
+# Выбираем один фиксированный сценарий ошибки для этой установки (всего 16 вариантов)
+AUTH_VARIANTS=(
+    "ERR_INVALID_CREDENTIALS|The username or password you entered is incorrect."
+    "ERR_INVALID_CREDENTIALS|The identity or security key you provided is invalid."
+    "ERR_BAD_PASSWORD|Incorrect password. Please verify your credentials and retry."
+    "ERR_KEY_MISMATCH|The security key provided does not match the account identity."
+    "ERR_CREDENTIAL_REJECTED|Credential verification rejected by the authentication authority."
+    "ERR_PASSWORD_MISMATCH|The password provided does not match the registered key."
+    "ERR_INCORRECT_KEY|Incorrect security credentials provided for this principal."
+    "ERR_USER_NOT_FOUND|Principal identity not found in directory services."
+    "ERR_IDENTITY_NOT_FOUND|No account found matching the provided identity."
+    "ERR_PRINCIPAL_MISSING|User principal does not exist in this organizational realm."
+    "ERR_ACCOUNT_NOT_FOUND|Account identifier not recognized by the identity provider."
+    "ERR_UNKNOWN_USER|Unrecognized user identity. Please verify your login."
+    "ERR_LOOKUP_FAILED|User lookup failed: Specified identity does not exist."
+    "ERR_AUTH_FAILED|Authentication failed: The provided credentials do not match."
+    "ERR_DIRECTORY_MISMATCH|Credentials could not be verified against the corporate directory."
+    "ERR_RECORDS_MISMATCH|The security credentials entered do not match our records."
+)
+
+RAND_AUTH=${AUTH_VARIANTS[$RANDOM % ${#AUTH_VARIANTS[@]}]}
+AUTH_CODE=$(echo "$RAND_AUTH" | cut -d'|' -f1)
+AUTH_MSG=$(echo "$RAND_AUTH" | cut -d'|' -f2)
+
 # конфиг nginx
 cat <<EOF > "$CONFIG_PATH"
 server {
     server_name $DOMAIN;
-	listen unix:/dev/shm/nginx.sock ssl http2 proxy_protocol;	
+    listen unix:/dev/shm/nginx.sock ssl http2 proxy_protocol;
     set_real_ip_from unix:;
     real_ip_header proxy_protocol;
-	
+
+    server_tokens off;
+
     root /var/www/$DOMAIN;
-    index index.php index.html;
-	
-	ssl_protocols TLSv1.2 TLSv1.3;
-	ssl_ciphers HIGH:!aNULL:!MD5;
-	ssl_prefer_server_ciphers on;
+    index index.html;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
 
     ssl_session_timeout 1d;
     ssl_session_cache shared:MozSSL:10m;
@@ -220,11 +273,25 @@ server {
     ssl_certificate_key "/etc/letsencrypt/live/$DOMAIN/privkey.pem";
 
     location = /${path_subpage}.json {
-		add_header profile-title "base64:YXV0b1hSQVk=";
-		add_header routing "happ://routing/onadd/eyJOYW1lIjoiYXV0b1hSQVkiLCJHbG9iYWxQcm94eSI6InRydWUiLCJSb3V0ZU9yZGVyIjoiYmxvY2stcHJveHktZGlyZWN0IiwiUmVtb3RlRE5TVHlwZSI6IkRvSCIsIlJlbW90ZUROU0RvbWFpbiI6Imh0dHBzOi8vZG5zLmdvb2dsZS9kbnMtcXVlcnkiLCJSZW1vdGVETlNJUCI6IjguOC40LjQiLCJEb21lc3RpY0ROU1R5cGUiOiJEb0giLCJEb21lc3RpY0ROU0RvbWFpbiI6Imh0dHBzOi8vY2xvdWRmbGFyZS1kbnMuY29tL2Rucy1xdWVyeSIsIkRvbWVzdGljRE5TSVAiOiIxLjEuMS4xIiwiR2VvaXB1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vTG95YWxzb2xkaWVyL3YycmF5LXJ1bGVzLWRhdC9yZWxlYXNlcy9sYXRlc3QvZG93bmxvYWQvZ2VvaXAuZGF0IiwiR2Vvc2l0ZXVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS9Mb3lhbHNvbGRpZXIvdjJyYXktcnVsZXMtZGF0L3JlbGVhc2VzL2xhdGVzdC9kb3dubG9hZC9nZW9zaXRlLmRhdCIsIkxhc3RVcGRhdGVkIjoiMTc3NTIwNjEwOCIsIkRuc0hvc3RzIjp7fSwiRGlyZWN0U2l0ZXMiOlsiZ2Vvc2l0ZTpjYXRlZ29yeS1ydSIsImdlb3NpdGU6cHJpdmF0ZSJdLCJEaXJlY3RJcCI6WyJnZW9pcDpwcml2YXRlIl0sIlByb3h5U2l0ZXMiOltdLCJQcm94eUlwIjpbXSwiQmxvY2tTaXRlcyI6WyJnZW9zaXRlOmNhdGVnb3J5LWFkcyIsImdlb3NpdGU6d2luLXNweSJdLCJCbG9ja0lwIjpbXSwiRG9tYWluU3RyYXRlZ3kiOiJJUElmTm9uTWF0Y2giLCJGYWtlRE5TIjoiZmFsc2UiLCJVc2VDaHVua0ZpbGVzIjoiZmFsc2UifQ";
-		
-		add_header routing-enable 0;
-	}
+        add_header profile-title "base64:YXV0b1hSQVk=";
+        add_header routing "happ://routing/onadd/eyJOYW1lIjoiYXV0b1hSQVkiLCJHbG9iYWxQcm94eSI6InRydWUiLCJSb3V0ZU9yZGVyIjoiYmxvY2stcHJveHktZGlyZWN0IiwiUmVtb3RlRE5TVHlwZSI6IkRvSCIsIlJlbW90ZUROU0RvbWFpbiI6Imh0dHBzOi8vZG5zLmdvb2dsZS9kbnMtcXVlcnkiLCJSZW1vdGVETlNJUCI6IjguOC40LjQiLCJEb21lc3RpY0ROU1R5cGUiOiJEb0giLCJEb21lc3RpY0ROU0RvbWFpbiI6Imh0dHBzOi8vY2xvdWRmbGFyZS1kbnMuY29tL2Rucy1xdWVyeSIsIkRvbWVzdGljRE5TSVAiOiIxLjEuMS4xIiwiR2VvaXB1cmwiOiJodHRwczovL2dpdGh1Yi5jb20vTG95YWxzb2xkaWVyL3YycmF5LXJ1bGVzLWRhdC9yZWxlYXNlcy9sYXRlc3QvZG93bmxvYWQvZ2VvaXAuZGF0IiwiR2Vvc2l0ZXVybCI6Imh0dHBzOi8vZ2l0aHViLmNvbS9Mb3lhbHNvbGRpZXIvdjJyYXktcnVsZXMtZGF0L3JlbGVhc2VzL2xhdGVzdC9kb3dubG9hZC9nZW9zaXRlLmRhdCIsIkxhc3RVcGRhdGVkIjoiMTc3NTIwNjEwOCIsIkRuc0hvc3RzIjp7fSwiRGlyZWN0U2l0ZXMiOlsiZ2Vvc2l0ZTpjYXRlZ29yeS1ydSIsImdlb3NpdGU6cHJpdmF0ZSJdLCJEaXJlY3RJcCI6WyJnZW9pcDpwcml2YXRlIl0sIlByb3h5U2l0ZXMiOltdLCJQcm94eUlwIjpbXSwiQmxvY2tTaXRlcyI6WyJnZW9zaXRlOmNhdGVnb3J5LWFkcyIsImdlb3NpdGU6d2luLXNweSJdLCJCbG9ja0lwIjpbXSwiRG9tYWluU3RyYXRlZ3kiOiJJUElmTm9uTWF0Y2giLCJGYWtlRE5TIjoiZmFsc2UiLCJVc2VDaHVua0ZpbGVzIjoiZmFsc2UifQ";
+        add_header routing-enable 0;
+    }
+
+    # Для сайта
+    location /api/v1/authenticate {
+        limit_except POST {
+            deny all;
+        }
+
+        default_type application/json;
+
+        add_header Set-Cookie "X-Auth-Token=\$request_id; Path=/; HttpOnly; Secure; SameSite=Lax" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+
+        return 401 '{"success":false,"code":"$AUTH_CODE","message":"$AUTH_MSG","request_id":"\$request_id"}';
+    }
 
     location ~ /\.ht {
         deny all;
@@ -240,10 +307,11 @@ server {
     }
 
     location / {
-		return 301 https://\$host\$request_uri;
+        return 301 https://\$host\$request_uri;
     }
 }
 EOF
+
 
 systemctl restart nginx
 
@@ -252,10 +320,10 @@ WEB_PATH="/var/www/$DOMAIN"
 mkdir -p "$WEB_PATH"
 
 # Генерируем сайт маскировку
-bash -c "$(curl -sL https://github.com/xVRVx/autoXRAY/raw/refs/heads/main/test/gen_page2.sh)" -- "$WEB_PATH"
+bash -c "$(curl -sL https://github.com/xVRVx/autoXRAY/raw/refs/heads/main/test/gen_page3.sh)" -- "$WEB_PATH"
 
 # Установка Xray
-bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+bash -c "$(curl -sL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version v26.7.28
 
 SCRIPT_DIR=/usr/local/etc/xray
 
@@ -353,10 +421,21 @@ cat << EOF > "$SCRIPT_DIR/config.json"
   },
   "dns": {
     "servers": [
-      "https+local://8.8.4.4/dns-query",
-      "https+local://8.8.8.8/dns-query",
-      "https+local://1.1.1.1/dns-query",
-      "localhost"
+      {
+        "address": "https+local://77.88.8.8/dns-query",
+        "domains": [
+          "geosite:category-ru",
+          "geosite:yandex",
+          "geosite:vk",
+          "domain:ru",
+          "domain:su",
+          "domain:xn--p1ai"
+        ],
+        "skipFallback": true
+      },
+      "https://8.8.4.4/dns-query",
+      "https://8.8.8.8/dns-query",
+      "https://1.1.1.1/dns-query"
     ],
     "queryStrategy": "UseIPv4"
   },
@@ -398,7 +477,7 @@ cat << EOF > "$SCRIPT_DIR/config.json"
         "realitySettings": {
           "show": false,
           "xver": 2,
-          "target": "127.0.0.1:500",
+          "target": "${TARGET_MTP}",
           "spiderX": "/",
           "shortIds": [
             "$xray_shortIds_vrv"
@@ -502,12 +581,21 @@ $OUTBOUNDS
     "rules": [
       {
         "ip": [
+          "8.8.8.8",
+          "8.8.4.4",
+          "1.1.1.1"
+        ],
+        "port": "53,443",
+        "balancerTag": "Super_Balancer"
+      },
+      {
+        "ip": [
           "geoip:private"
         ],
         "outboundTag": "block"
       },
       {
-        "port": "25",
+        "port": "25, 135, 137-139, 445",
         "outboundTag": "block"
       },
       {
@@ -538,20 +626,20 @@ $OUTBOUNDS
       {
         "domain": [
           "testipv6.net",
+          "domain:ru",
+          "domain:su",
+          "domain:xn--p1ai",
           "geosite:apple",
           "geosite:apple-pki",
-          "geosite:huawei",
-          "geosite:xiaomi",
-          "geosite:category-android-app-download",
-          "geosite:f-droid",
           "geosite:yandex",
           "geosite:vk",
-          "geosite:microsoft",
-          "geosite:win-update",
-          "geosite:win-extra",
-          "geosite:google-play",
-          "geosite:steam",
           "geosite:category-ru"
+        ],
+        "outboundTag": "direct"
+      },
+      {
+        "ip": [
+          "geoip:ru"
         ],
         "outboundTag": "direct"
       },
@@ -578,7 +666,19 @@ print_config() {
     "loglevel": "warning"
   },
   "dns": {
-    "servers":[
+    "servers": [
+      {
+        "address": "https+local://77.88.8.8/dns-query",
+        "domains": [
+          "geosite:category-ru",
+          "geosite:yandex",
+          "geosite:vk",
+          "domain:ru",
+          "domain:su",
+          "domain:xn--p1ai"
+        ],
+        "skipFallback": true
+      },
       "https://8.8.4.4/dns-query",
       "https://8.8.8.8/dns-query",
       "https://1.1.1.1/dns-query"
@@ -588,59 +688,55 @@ print_config() {
   "routing": {
     "domainMatcher": "hybrid",
     "domainStrategy": "IPIfNonMatch",
-    "rules":[
+    "rules": [
       {
-        "domain":[
+        "domain": [
           "geosite:category-ads",
           "geosite:win-spy"
         ],
         "outboundTag": "block"
       },
       {
-        "protocol":[
+        "protocol": [
           "bittorrent"
         ],
         "outboundTag": "direct"
       },
       {
-        "domain":[
-          "habr.com", "apkmirror.com"
+        "domain": [
+          "habr.com",
+          "apkmirror.com"
         ],
         "outboundTag": "proxy"
       },
       {
-        "domain":[
+        "domain": [
           "geosite:private",
           "ifconfig.me",
           "checkip.amazonaws.com",
           "pify.org",
-		  "geosite:category-ip-geo-detect",
+          "domain:ru",
+          "domain:su",
+          "domain:xn--p1ai",
+          "geosite:category-ip-geo-detect",
           "geosite:apple",
           "geosite:apple-pki",
-          "geosite:huawei",
-          "geosite:xiaomi",
-          "geosite:category-android-app-download",
-          "geosite:f-droid",
           "geosite:yandex",
           "geosite:vk",
-          "geosite:microsoft",
-          "geosite:win-update",
-          "geosite:win-extra",
-          "geosite:google-play",
-          "geosite:steam",
           "geosite:category-ru"
         ],
         "outboundTag": "direct"
       },
       {
-        "ip":[
+        "ip": [
+          "geoip:ru",
           "geoip:private"
         ],
         "outboundTag": "direct"
       }
     ]
   },
-  "inbounds":[
+  "inbounds": [
     {
       "tag": "socks-in",
       "protocol": "socks",
@@ -651,7 +747,7 @@ print_config() {
       },
       "sniffing": {
         "enabled": true,
-        "destOverride":[ "http", "tls", "quic" ]
+        "destOverride": [ "http", "tls", "quic" ]
       }
     },
     {
@@ -664,7 +760,7 @@ print_config() {
       },
       "sniffing": {
         "enabled": true,
-        "destOverride":[ "http", "tls", "quic" ]
+        "destOverride": [ "http", "tls", "quic" ]
       }
     },
     {
@@ -674,11 +770,11 @@ print_config() {
       "port": 10809,
       "sniffing": {
         "enabled": true,
-        "destOverride":[ "http", "tls", "quic" ]
+        "destOverride": [ "http", "tls", "quic" ]
       }
     }
   ],
-  "outbounds":[
+  "outbounds": [
 $PROXY_OUTBOUND,
     {
       "tag": "direct",
@@ -739,7 +835,7 @@ for (( i=0; i<COUNT; i++ )); do
           }
         },
         "realitySettings": {
-          "show": false, "fingerprint": "chrome", "serverName": "$DOMAIN",
+          "show": false, "fingerprint": "$fpBro", "serverName": "$DOMAIN",
           "password": "$xray_publicKey_vrv", "shortId": "$xray_shortIds_vrv", "spiderX": "/"
         }
       }
@@ -764,7 +860,7 @@ EOF
         "network": "raw",
         "security": "reality",
         "realitySettings": {
-          "show": false, "fingerprint": "chrome", "serverName": "$DOMAIN",
+          "show": false, "fingerprint": "$fpBro", "serverName": "$DOMAIN",
           "password": "$xray_publicKey_vrv", "shortId": "$xray_shortIds_vrv", "spiderX": "/"
         }
       }
@@ -822,9 +918,9 @@ EOF
     fi
 
     # --- Генерируем ссылки vless:// для HTML странички (с портом моста) ---
-    link_xhttp="vless://${BRIDGE_UUID[$i]}@$DOMAIN:$SERVER_PORT?security=reality&type=xhttp&headerType=&path=%2F$path_xhttp&host=&mode=stream-one&extra=%7B%22xmux%22%3A%7B%22cMaxReuseTimes%22%3A%221000-3000%22%2C%22maxConcurrency%22%3A%223-5%22%2C%22maxConnections%22%3A0%2C%22hKeepAlivePeriod%22%3A0%2C%22hMaxRequestTimes%22%3A%22400-700%22%2C%22hMaxReusableSecs%22%3A%221200-1800%22%7D%2C%22headers%22%3A%7B%7D%2C%22noGRPCHeader%22%3Afalse%2C%22xPaddingBytes%22%3A%22400-800%22%2C%22scMaxEachPostBytes%22%3A1500000%2C%22scMinPostsIntervalMs%22%3A20%2C%22scStreamUpServerSecs%22%3A%2260-240%22%7D&sni=$DOMAIN&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&spx=%2F#RU%3EEU_xhttp_$REMARK_BASE"
+    link_xhttp="vless://${BRIDGE_UUID[$i]}@$DOMAIN:$SERVER_PORT?security=reality&type=xhttp&headerType=&path=%2F$path_xhttp&host=&mode=stream-one&extra=%7B%22xmux%22%3A%7B%22cMaxReuseTimes%22%3A%221000-3000%22%2C%22maxConcurrency%22%3A%223-5%22%2C%22maxConnections%22%3A0%2C%22hKeepAlivePeriod%22%3A0%2C%22hMaxRequestTimes%22%3A%22400-700%22%2C%22hMaxReusableSecs%22%3A%221200-1800%22%7D%2C%22headers%22%3A%7B%7D%2C%22noGRPCHeader%22%3Afalse%2C%22xPaddingBytes%22%3A%22400-800%22%2C%22scMaxEachPostBytes%22%3A1500000%2C%22scMinPostsIntervalMs%22%3A20%2C%22scStreamUpServerSecs%22%3A%2260-240%22%7D&sni=$DOMAIN&fp=$fpBro&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&spx=%2F#RU%3EEU_xhttp_$REMARK_BASE"
 
-    link_raw="vless://${BRIDGE_UUID[$i]}@$DOMAIN:$SERVER_PORT?security=reality&type=tcp&headerType=&path=&host=&flow=xtls-rprx-vision&sni=$DOMAIN&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&spx=%2F#RU%3EEU_raw_$REMARK_BASE"
+    link_raw="vless://${BRIDGE_UUID[$i]}@$DOMAIN:$SERVER_PORT?security=reality&type=tcp&headerType=&path=&host=&flow=xtls-rprx-vision&sni=$DOMAIN&fp=$fpBro&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&spx=%2F#RU%3EEU_raw_$REMARK_BASE"
 
     CONFIGS_ARRAY+=( "XHTTP (RU>EU $REMARK_BASE)|$link_xhttp" )
     CONFIGS_ARRAY+=( "RAW VISION (RU>EU $REMARK_BASE)|$link_raw" )
@@ -840,8 +936,13 @@ echo -e "Перезапуск XRAY"
 subPageLink="https://$DOMAIN/$path_subpage.json"
 configListLink="https://$DOMAIN/$path_subpage.html"
 
-echo -e "\n\n${GRN}Устанавливаем MTProto FakeTLS ${NC}"
-source <(curl -sL https://github.com/xVRVx/autoXRAY/raw/refs/heads/main/test/telemt-test.sh)
+if [ "$INSTALL_MTP" = true ]; then
+    echo -e "\n\n${GRN}Устанавливаем MTProto FakeTLS ${NC}"
+    source <(curl -sL https://github.com/xVRVx/autoXRAY/raw/refs/heads/main/test/telemt-test.sh)
+else
+    echo -e "\n\n${YEL}Установка MTProto FakeTLS пропущена.${NC}"
+    MTProto=""
+fi
 
 echo -e "\n\n${GRN}Создаем страницу подписки ${NC}"
 cat > "$WEB_PATH/$path_subpage.html" <<'EOF'
@@ -898,24 +999,32 @@ EOF
     ((idx++))
 done
 
-SOCKS5_url="tg://socks?server=$DOMAIN&port=10443&user=${socksUser}&pass=${socksPasw}"
+SOCKS5_url_tg="tg://socks?server=$DOMAIN&port=10443&user=${socksUser}&pass=${socksPasw}"
+SOCKS5_url="${socksUser}:${socksPasw}@$DOMAIN:10443"
 
-# Дописываем Socks5, MTProto, All links и подвал
+# Добавляем socks5 блок
 cat >> "$WEB_PATH/$path_subpage.html" <<EOF
 <div class="config-row">
-    <div class="config-label">Мост Socks5 (TG)</div>
-    <div class="config-code" id="sock">${SOCKS5_url}</div>
-    <button class="btn-action copy-btn" onclick="copyText('sock', this)">Copy</button>
-    <a href="${SOCKS5_url}" target="_blank" class="btn-action qr-btn" title="автодобавление моста в тг" style="text-decoration:none">✈️ Add to TG</a>
+    <div class="config-label" title="Пора отказываться от него">socks5 WARNING</div>
+    <div class="config-code" id="socks5">${SOCKS5_url}</div>
+    <button class="btn-action copy-btn" onclick="copyText('socks5', this)">Copy</button>
 </div>
+EOF
 
+# Добавляем MTProxy блок только если он установлен
+if [ "$INSTALL_MTP" = true ]; then
+cat >> "$WEB_PATH/$path_subpage.html" <<EOF
 <div class="config-row">
-    <div class="config-label">Мост MTProtoFakeTLS (TG)</div>
+    <div class="config-label">MTProtoFakeTLS (TG)</div>
     <div class="config-code" id="mtproto">${MTProto}</div>
     <button class="btn-action copy-btn" onclick="copyText('mtproto', this)">Copy</button>
     <a href="${MTProto}" target="_blank" class="btn-action qr-btn" title="автодобавление моста в тг" style="text-decoration:none">✈️ Add to TG</a>
 </div>
+EOF
+fi
 
+# Дописываем конец страницы
+cat >> "$WEB_PATH/$path_subpage.html" <<EOF
 <h2>💠 Все конфиги вместе</h2>
 <div class="config-row">
     <div class="config-code" id="cAll" style="max-height:60px;white-space:pre-wrap;word-break:break-all">$ALL_LINKS_TEXT</div>
@@ -932,9 +1041,17 @@ EOF
 # --- ФИНАЛЬНАЯ ПРОВЕРКА ---
 echo -e "\n${YEL}=== Финальная проверка статусов ===${NC}"
 
-if systemctl is-active --quiet telemt; then echo -e "Telemt: ${GRN}RUNNING${NC}"; else echo -e "Telemt: ${RED}STOPPED/ERROR${NC}"; fi
+if [ "$INSTALL_MTP" = true ]; then
+    if systemctl is-active --quiet telemt; then echo -e "Telemt: ${GRN}RUNNING${NC}"; else echo -e "Telemt: ${RED}STOPPED/ERROR${NC}"; fi
+fi
 if systemctl is-active --quiet nginx; then echo -e "Nginx: ${GRN}RUNNING${NC}"; else echo -e "Nginx: ${RED}STOPPED/ERROR${NC}"; fi
 if systemctl is-active --quiet xray; then echo -e "XRAY: ${GRN}RUNNING${NC}"; else echo -e "XRAY: ${RED}STOPPED/ERROR${NC}"; fi
+
+
+echo -e "\n"
+if [ "$INSTALL_MTP" = true ]; then
+    echo -e "${YEL}MTProto FakeTLS для ТГ${NC}\n$MTProto\n"
+fi
 
 echo -e "
 ${YEL}✅ Сгенерировано мостов: ${GRN}$COUNT${NC}
@@ -944,9 +1061,6 @@ ${GRN}$subPageLink${NC}
 
 ${YEL}Ссылка на сохраненные конфиги (Web UI) ${NC}
 ${GRN}$configListLink ${NC}
-
-${YEL}MTProto FakeTLS для ТГ${NC}
-${GRN}$MTProto ${NC}
 
 Скопируйте подписку в специализированное приложение:
 - iOS: Happ или v2RayTun или v2rayN
