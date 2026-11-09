@@ -11,6 +11,7 @@ Bash-скрипт для автоматической настройки ядр�
 
 | Обновление | Суть |
 |:--|:--|
+| **UPD6** | Ядро `v26.11.9` (отпечаток Chrome 155), отключён MPTCP (фикс уязвимости ядра Linux), приватный ключ сертификата больше не доступен всем пользователям системы. Экспериментально: [VLESS через S3-хранилище](#xdrive) |
 | **UPD5** | Ядро переведено на `v26.10.31` — обновите клиентские приложения |
 | **UPD4** | Все инбаунды переведены на **443** порт |
 | **UPD3** | Добавлен **Web Proxy TG** |
@@ -25,7 +26,7 @@ Bash-скрипт для автоматической настройки ядр�
 Для установки надо [арендовать VPS](#servers), [получить домен](#domain) и запустить скрипт:
 
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/autoXRAY2.sh)" -- вашДОМЕН.com
+bash -c "$(curl -L https://raw.githubusercontent.com/vmhlov/autoXRAY/main/autoXRAY2.sh)" -- вашДОМЕН.com
 ```
 
 Скрипт сам поставит Xray и Nginx, выпустит TLS-сертификат, сгенерирует UUID/ключи/пароли, поднимет сайт-маскировку и выдаст готовые ссылки на конфиги.
@@ -159,13 +160,13 @@ bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/refs/heads/m
 **1)** На заблокированный чистый VPS ставим стандартный рекомендованный скрипт и берём получившийся **VLESS XHTTP TLS EXTRA**:
 
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/autoXRAY2.sh)" -- поддомен1.вашДОМЕН.com
+bash -c "$(curl -L https://raw.githubusercontent.com/vmhlov/autoXRAY/main/autoXRAY2.sh)" -- поддомен1.вашДОМЕН.com
 ```
 
 **2)** На RU-VPS ставим скрипт моста (нужен именно `vless XHTTP TLS`):
 
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/bridgeTLSxhttp.sh)" -- поддомен2.вашДОМЕН.com "vless://вашКонфигXHTTP"
+bash -c "$(curl -L https://raw.githubusercontent.com/vmhlov/autoXRAY/main/bridgeTLSxhttp.sh)" -- поддомен2.вашДОМЕН.com "vless://вашКонфигXHTTP"
 ```
 
 Итоговая цепочка:
@@ -177,7 +178,7 @@ bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/bridgeT
 Можно использовать несколько XHTTP-конфигов — все они будут добавлены в мост:
 
 ```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/bridgeTLSxhttp.sh)" -- поддомен2.Домен.Ком "vless://xhttp1" "vless://xhttp2" "vless://xhttp3"
+bash -c "$(curl -L https://raw.githubusercontent.com/vmhlov/autoXRAY/main/bridgeTLSxhttp.sh)" -- поддомен2.Домен.Ком "vless://xhttp1" "vless://xhttp2" "vless://xhttp3"
 ```
 
 ---
@@ -218,6 +219,25 @@ bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/bridgeT
 | `/etc/tproxy-server/profiles.json` | Профили прокси |
 
 При установке скрипт спросит, нужен ли web proxy — отвечайте `y` (по умолчанию), если он вам нужен.
+
+---
+
+<a id="xdrive"></a>
+## ☁️ VLESS через S3-хранилище (экспериментально)
+
+Новый транспорт Xray **XDRIVE**: клиент соединяется не с вашим VPS, а только с облачным хранилищем (Yandex Cloud / VK Cloud), сервер забирает данные оттуда же. IP сервера провайдер не видит. Ставится поверх основного скрипта, существующие конфиги не меняются:
+
+```bash
+bash -c "$(curl -L https://github.com/vmhlov/autoXRAY/raw/refs/heads/main/test/xdriveS3-test.sh)" -- https://storage.yandexcloud.net ИМЯ_БАКЕТА ID_КЛЮЧА СЕКРЕТ
+```
+
+Задержка около 1 с, запросы к хранилищу платные, нужен клиент на Xray-core >= v26.11.9. Подробности и ограничения: [test/xdrive-readme.md](test/xdrive-readme.md).
+
+---
+
+## 🛡️ Безопасность ядра (MPTCP)
+
+С UPD6 скрипт отключает MPTCP (`net.mptcp.enabled=0`) из-за [уязвимости ядра Linux](https://github.com/XTLS/Xray-core/pull/7291), а Xray начиная с v26.10.31 не использует MPTCP сам. Это только снижает риск. **Обновите ядро:** `apt-get update && apt-get full-upgrade -y && reboot`.
 
 ---
 

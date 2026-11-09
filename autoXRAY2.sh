@@ -115,6 +115,7 @@ net.core.rmem_max=16777216
 net.core.wmem_max=16777216
 net.ipv4.tcp_rmem=4096 87380 16777216
 net.ipv4.tcp_wmem=4096 65536 16777216
+net.mptcp.enabled=0
 EOF
 sysctl --system >/dev/null 2>&1
 echo -e "${GRN}BBR, TCP буферы и MTU Probing активированы${NC}"
@@ -136,7 +137,7 @@ mkdir -p "$WEB_PATH"
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/xVRVx/autoXRAY/main/test/gen_page3.sh)" -- "$WEB_PATH"
 
 # Установка Xray
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install --version v26.10.31
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh)" @ install --version v26.11.9
 
 # ==========================================
 # Блок ACME.SH (Установка и выпуск сертификата)
@@ -194,7 +195,7 @@ if [ ! -s /var/lib/xray/cert/fullchain.pem ]; then
     $ACME_BIN --install-cert -d "$DOMAIN" --ecc \
       --fullchain-file /var/lib/xray/cert/fullchain.pem \
       --key-file /var/lib/xray/cert/privkey.pem \
-      --reloadcmd "chmod 644 /var/lib/xray/cert/privkey.pem /var/lib/xray/cert/fullchain.pem; systemctl reload nginx; systemctl restart xray"
+      --reloadcmd "chown root:xray /var/lib/xray/cert/privkey.pem; chmod 640 /var/lib/xray/cert/privkey.pem; chmod 644 /var/lib/xray/cert/fullchain.pem; systemctl reload nginx; systemctl restart xray"
 fi
 
 # Жесткая проверка: файл появился и он не пустой?
@@ -205,7 +206,9 @@ if [ ! -s /var/lib/xray/cert/fullchain.pem ]; then
     exit 1
 fi
 
-chmod 644 /var/lib/xray/cert/privkey.pem /var/lib/xray/cert/fullchain.pem
+chown root:xray /var/lib/xray/cert/privkey.pem
+chmod 640 /var/lib/xray/cert/privkey.pem
+chmod 644 /var/lib/xray/cert/fullchain.pem
 echo -e "${GRN}✅ Сертификат успешно настроен и применен!${NC}"
 # ========================================== #
 
