@@ -38,6 +38,8 @@ bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/autoXRA
 7) socks5 прокси на 10443 порту - используйте для сервисов (например: ТГ).
 8) **НОВОЕ:** vless XHTTP SPLIT - отправка данных идёт через REALITY на 443, приём через TLS на 8443.
 
+**Экспериментально: VLESS через S3-хранилище (XDRIVE).** Клиент соединяется только с облачным хранилищем (Yandex Cloud / VK Cloud), а не с вашим сервером. Ставится отдельным скриптом поверх основного, подробнее в [xdrive-readme.md](test/xdrive-readme.md).
+
 ### Что нового в UPD6
 - **XHTTP SPLIT (↑REALITY ↓TLS).** Одна сессия VLESS делится на два независимых соединения: upload идёт через XHTTP REALITY на 443, download через XHTTP TLS на 8443 (через nginx). Оба потока сходятся в один XHTTP inbound и склеиваются по session id. Для DPI это два разных TLS-соединения с разными профилями трафика вместо одного туннеля «всё в одном». Обход ТСПУ проверить локально нельзя, это дополнительный вариант, а не гарантия. Нужен клиент на свежем Xray-core (Happ, v2rayN, v2rayNG и т.п.). Если что-то не работает, используйте обычные конфиги, они остались без изменений.
 - **Безопасность.** `net.mptcp.enabled=0` и требование Xray >= v26.10.31: [уязвимость ядра Linux через MPTCP](https://github.com/XTLS/Xray-core/pull/7291). Отключение MPTCP только снижает риск, поэтому обновите ядро: `apt-get update && apt-get full-upgrade -y && reboot`.
