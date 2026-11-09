@@ -1,6 +1,8 @@
 # autoXRAY - личный ВПН сервер
 Bash-скрипт для автоматической настройки ядра [Xray](https://github.com/XTLS/Xray-core). Предназначен для удобного получения актуальных конфигураций VPN для семейного/личного использования, настраивает selfsteal VLESS [XHTTP](https://github.com/XTLS/Xray-core/discussions/4113#discussioncomment-11468947) / [RAW](https://github.com/XTLS/REALITY/blob/main/README.en.md) REALITY.
 
+**UPD6 (ноябрь 2026): обновление под Xray-core v26.11.9.** Новый конфиг **XHTTP SPLIT** (отправка через REALITY:443, приём через TLS:8443), отключение MPTCP (срочный фикс безопасности ядра Linux), исправлен запуск Xray со встроенными geodata, приватный ключ сертификата больше не доступен всем пользователям системы. Подробнее — [что нового](#что-нового-в-upd6).
+
 **UPD5: Добавлена тестовая сборка для подключения MTProto proxy FakeTLS - [readme-test.md](https://github.com/xVRVx/autoXRAY/blob/main/test/readme-test.md)** 
 
 **UPD4: Основной скрипт автоматически ставит WARP-cli.** 
@@ -34,6 +36,15 @@ bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/autoXRA
 5) vless WS tls - 8443 порт
 6) vless GRPC tls - 8443 порт
 7) socks5 прокси на 10443 порту - используйте для сервисов (например: ТГ).
+8) **НОВОЕ:** vless XHTTP SPLIT - отправка данных идёт через REALITY на 443, приём через TLS на 8443.
+
+### Что нового в UPD6
+- **XHTTP SPLIT (↑REALITY ↓TLS).** Одна сессия VLESS делится на два независимых соединения: upload идёт через XHTTP REALITY на 443, download через XHTTP TLS на 8443 (через nginx). Оба потока сходятся в один XHTTP inbound и склеиваются по session id. Для DPI это два разных TLS-соединения с разными профилями трафика вместо одного туннеля «всё в одном». Обход ТСПУ проверить локально нельзя, это дополнительный вариант, а не гарантия. Нужен клиент на свежем Xray-core (Happ, v2rayN, v2rayNG и т.п.). Если что-то не работает, используйте обычные конфиги, они остались без изменений.
+- **Безопасность.** `net.mptcp.enabled=0` и требование Xray >= v26.10.31: [уязвимость ядра Linux через MPTCP](https://github.com/XTLS/Xray-core/pull/7291). Отключение MPTCP только снижает риск, поэтому обновите ядро: `apt-get update && apt-get full-upgrade -y && reboot`.
+- **Сертификат.** Xray теперь работает от пользователя `xray`. Приватный ключ копируется с правами `640 root:xray` вместо `744`, а хук продления лежит в `/etc/letsencrypt/renewal-hooks/deploy/autoXRAY.sh`.
+- **Geodata.** Установщик Xray теперь ставит встроенные geoip/geosite, в которых нет `geosite:win-spy`. Из-за этого Xray на свежей установке не запускался. Категория убрана из серверных конфигов.
+- **Исправления.** Загрузка через XHTTP TLS больше 1 МБ за запрос (раньше сервер отвечал 413), устаревший `freedom.domainStrategy` заменён на `sockopt`, в итоговом выводе под «XHTTP TLS» больше не печатается ссылка REALITY, удалён мёртвый fallback от Shadowsocks.
+- **Клиенты.** Обновите приложения. REALITY-серверы Xray >= v26.9 отклоняют клиентов с отпечатками без post-quantum key share (`edge`, `ios`, `random`). Скрипт использует `chrome`, это актуальный Chrome 155+ отпечаток.
 
 
 ===========================================================================
@@ -110,6 +121,8 @@ bash -c "$(curl -L https://raw.githubusercontent.com/xVRVx/autoXRAY/main/autoXRA
 ```bash
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 ```
+**Важно для установок до UPD6:** обновление ядра заменяет geosite.dat на встроенный, в котором нет `win-spy`, `win-update`, `win-extra`. Перед обновлением удалите эти категории из `/usr/local/etc/xray/config.json` (или переустановите скрипт) и проверьте: `xray run -test -config /usr/local/etc/xray/config.json`.
+
 **Обновить WARP-cli**
 ```bash
 bash <(curl -fsSL https://gitlab.com/fscarmen/warp/-/raw/main/menu.sh) v

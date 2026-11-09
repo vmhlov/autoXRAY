@@ -519,7 +519,6 @@ $OUTBOUNDS
       {
         "domain": [
           "geosite:category-ads",
-          "geosite:win-spy",
           "geosite:private"
         ],
         "outboundTag": "block"
@@ -547,8 +546,6 @@ $OUTBOUNDS
           "geosite:yandex",
           "geosite:vk",
           "geosite:microsoft",
-          "geosite:win-update",
-          "geosite:win-extra",
           "geosite:google-play",
           "geosite:steam",
           "geosite:category-ru"

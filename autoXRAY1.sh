@@ -36,16 +36,16 @@ if [ "$LOCAL_IP" != "$DNS_IP" ]; then
 fi
 
 
-# Включаем BBR
-bbr=$(sysctl -a | grep net.ipv4.tcp_congestion_control)
-if [ "$bbr" = "net.ipv4.tcp_congestion_control = bbr" ]; then
-    echo -e "${GRN}BBR уже запущен${NC}"
-else
-    echo "net.core.default_qdisc=fq" > /etc/sysctl.d/999-autoXRAY.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/999-autoXRAY.conf
-    sysctl --system
-    echo -e "${GRN}BBR активирован${NC}"
-fi
+# BBR + отключение MPTCP (уязвимость ядра через IPv4 MPTCP listener,
+# см. https://github.com/XTLS/Xray-core/pull/7291). Отключение лишь снижает риск, ядро всё равно нужно обновить.
+{
+    echo "net.core.default_qdisc=fq"
+    echo "net.ipv4.tcp_congestion_control=bbr"
+    [ -e /proc/sys/net/mptcp/enabled ] && echo "net.mptcp.enabled=0"
+} > /etc/sysctl.d/999-autoXRAY.conf
+sysctl --system >/dev/null
+echo -e "${GRN}BBR: $(sysctl -n net.ipv4.tcp_congestion_control), MPTCP: $(sysctl -n net.mptcp.enabled 2>/dev/null || echo 'нет в ядре')${NC}"
+echo -e "${YEL}Ядро: $(uname -r). Регулярно обновляйте систему: apt-get update && apt-get full-upgrade -y && reboot${NC}"
 
 
 cat <<EOF > /etc/security/limits.d/99-autoXRAY.conf
@@ -67,6 +67,16 @@ bash -c "$(curl -L https://github.com/xVRVx/autoXRAY/raw/refs/heads/main/test/ge
 
 # Установка Xray
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# v26.10.31 — срочный фикс MPTCP; более старые ядра Xray не ставим
+XRAY_MIN_VERSION="26.10.31"
+XRAY_VERSION=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
+if [ -z "$XRAY_VERSION" ] || [ "$(printf '%s\n' "$XRAY_MIN_VERSION" "$XRAY_VERSION" | sort -V | head -n1)" != "$XRAY_MIN_VERSION" ]; then
+    echo -e "${RED}❌ Xray ${XRAY_VERSION:-не установлен}: требуется версия >= $XRAY_MIN_VERSION${NC}"
+    exit 1
+fi
+echo -e "${GRN}Xray $XRAY_VERSION установлен${NC}"
+XRAY_GROUP=$(id -gn xray 2>/dev/null || echo nogroup)
 
 # Блок CERTBOT - START
 
@@ -104,19 +114,28 @@ fi
 
 mkdir -p /var/lib/xray/cert/
 
-### Проверить
-cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem /var/lib/xray/cert/fullchain.pem
-cp /etc/letsencrypt/live/$DOMAIN/privkey.pem /var/lib/xray/cert/privkey.pem
-chmod 744 /var/lib/xray/cert/privkey.pem
-chmod 744 /var/lib/xray/cert/fullchain.pem
+# Xray работает от пользователя xray (UMask 0077): ключ доступен только root и группе xray
+CERT_HOOK="/etc/letsencrypt/renewal-hooks/deploy/autoXRAY.sh"
+mkdir -p "$(dirname "$CERT_HOOK")"
+cat > "$CERT_HOOK" <<EOF
+#!/bin/sh
+install -m 644 -o root -g root "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" /var/lib/xray/cert/fullchain.pem
+install -m 640 -o root -g $XRAY_GROUP "/etc/letsencrypt/live/$DOMAIN/privkey.pem" /var/lib/xray/cert/privkey.pem
+systemctl reload nginx
+systemctl restart xray
+EOF
+chmod 755 "$CERT_HOOK"
 
 certbot certonly --webroot -w /var/www/html \
-  -d $DOMAIN \
-  -m mail@$DOMAIN \
-  --agree-tos --non-interactive \
-  --deploy-hook "systemctl reload nginx; cp /etc/letsencrypt/live/$DOMAIN/fullchain.pem /var/lib/xray/cert/fullchain.pem; cp /etc/letsencrypt/live/$DOMAIN/privkey.pem /var/lib/xray/cert/privkey.pem; chmod 744 /var/lib/xray/cert/privkey.pem; chmod 744 /var/lib/xray/cert/fullchain.pem; systemctl restart xray"
+  -d "$DOMAIN" \
+  -m "mail@$DOMAIN" \
+  --agree-tos --non-interactive
 
 RET=$?
+# certbot не вызывает deploy-hook, если действующий сертификат уже есть (повторный запуск скрипта)
+[ $RET -eq 0 ] && "$CERT_HOOK"
+# Старые версии скрипта сохраняли в renewal-конфиг хук с chmod 744 на приватный ключ
+sed -i '/^renew_hook = .*chmod 744/d' "/etc/letsencrypt/renewal/$DOMAIN.conf" 2>/dev/null
 
 if [ $RET -eq 0 ]; then
   echo -e "\n${GRN}========================================"
@@ -177,10 +196,16 @@ server {
 		add_header routing-enable 0;
 	}
     
+    # Тот же inbound, что и у XHTTP REALITY — нужно для режима UP/DOWN split
     location /${path_xhttp} {
-        proxy_pass http://127.0.0.1:8400;
+        proxy_pass http://127.0.0.1:3333;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        client_max_body_size 0;
+        proxy_read_timeout 1h;
+        proxy_send_timeout 1h;
     }
 	
     location /${path_xhttp}11 {
@@ -288,7 +313,7 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
         "fallbacks": [
           {
             "dest": "3333",
-            "xver": 2
+            "xver": 0
           }
         ]
       },
@@ -352,12 +377,13 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
       "streamSettings": {
         "network": "xhttp",
         "xhttpSettings": {
-          "mode": "stream-one",
-		  "path": "/${path_xhttp}"
+          "mode": "auto",
+          "path": "/${path_xhttp}",
+          "scMaxEachPostBytes": 1500000
         },
         "security": "none",
         "sockopt": {
-          "acceptProxyProtocol": true
+          "acceptProxyProtocol": false
         }
       }
     },
@@ -379,10 +405,6 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
             "path": "/${path_xhttp}22",
             "dest": "@vless-ws",
             "xver": 2
-          },
-          {
-            "path": "/ssws",
-            "dest": "4001"
           },
           {
 		    "alpn": "h2",
@@ -410,39 +432,6 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
           "alpn": [
             "h2", "http/1.1"
           ]
-        }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls",
-          "quic"
-        ]
-      }
-    },
-    {
-      "tag": "vsXHTTPtls",
-      "port": 8400,
-      "listen": "127.0.0.1",
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${xray_uuid_vrv}"
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "xhttp",
-        "xhttpSettings": {
-          "mode": "auto",
-          "path": "/${path_xhttp}"
-        },
-        "security": "none",
-        "sockopt": {
-          "acceptProxyProtocol": false
         }
       },
       "sniffing": {
@@ -534,8 +523,10 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
     {
       "tag": "direct",
       "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "ForceIPv4"
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "ForceIPv4"
+        }
       }
     },
     {
@@ -576,7 +567,6 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
       {
         "domain": [
           "geosite:category-ads",
-          "geosite:win-spy",
           "geosite:private"
         ],
         "outboundTag": "block"
@@ -894,6 +884,44 @@ OUT_WS='{
   }
 }'
 
+# --- Config 7: XHTTP UP/DOWN split — отправка через REALITY:443, приём через TLS:8443.
+# Обе половины попадают в один XHTTP inbound (3333) и склеиваются по session id,
+# поэтому для DPI это два независимых соединения с разными TLS-профилями и объёмами.
+OUT_SPLIT='{
+  "tag": "proxy",
+  "protocol": "vless",
+  "settings": {
+    "vnext": [{
+      "address": "$DOMAIN",
+      "port": 443,
+      "users": [{ "id": "${xray_uuid_vrv}", "encryption": "none" }]
+    }]
+  },
+  "streamSettings": {
+    "network": "xhttp",
+    "security": "reality",
+    "xhttpSettings": {
+      "mode": "stream-up",
+      "path": "/${path_xhttp}",
+      "extra": {
+        "xPaddingBytes": "400-800",
+        "downloadSettings": {
+          "address": "$DOMAIN",
+          "port": 8443,
+          "network": "xhttp",
+          "security": "tls",
+          "tlsSettings": { "serverName": "$DOMAIN", "fingerprint": "chrome", "alpn": ["h2"] },
+          "xhttpSettings": { "path": "/${path_xhttp}" }
+        }
+      }
+    },
+    "realitySettings": {
+      "show": false, "fingerprint": "chrome", "serverName": "$DOMAIN",
+      "password": "${xray_publicKey_vrv}", "shortId": "${xray_shortIds_vrv}", "spiderX": "/"
+    }
+  }
+}'
+
 
 
 (
@@ -909,6 +937,8 @@ OUT_WS='{
   print_config "$OUT_GRPC"      "🇪🇺 VLESS gRPC TLS"
   echo ","
   print_config "$OUT_WS"        "🇪🇺 VLESS WS TLS"
+  echo ","
+  print_config "$OUT_SPLIT"     "🇪🇺 VLESS XHTTP SPLIT ↑REALITY ↓TLS"
   echo "]"
 ) | envsubst > "$WEB_PATH/$path_subpage.json"
 
@@ -932,6 +962,9 @@ linkTLS3="vless://${xray_uuid_vrv}@$DOMAIN:8443?security=tls&type=ws&headerType=
 
 linkTLS4="vless://${xray_uuid_vrv}@$DOMAIN:8443?security=tls&type=grpc&headerType=&serviceName=${path_xhttp}11&host=&sni=$DOMAIN&fp=chrome&spx=%2F#vlessGRPCtls-autoXRAY"
 
+splitExtra=$(jq -rn --arg d "$DOMAIN" --arg p "/$path_xhttp" '{xPaddingBytes:"400-800",downloadSettings:{address:$d,port:8443,network:"xhttp",security:"tls",tlsSettings:{serverName:$d,fingerprint:"chrome",alpn:["h2"]},xhttpSettings:{path:$p}}} | tojson | @uri')
+linkSPLIT="vless://${xray_uuid_vrv}@$DOMAIN:443?security=reality&type=xhttp&path=%2F${path_xhttp}&mode=stream-up&extra=${splitExtra}&sni=$DOMAIN&fp=chrome&pbk=${xray_publicKey_vrv}&sid=${xray_shortIds_vrv}&spx=%2F#vlessXHTTPsplit-autoXRAY"
+
 configListLink="https://$DOMAIN/$path_subpage.html"
 
 CONFIGS_ARRAY=(
@@ -941,6 +974,7 @@ CONFIGS_ARRAY=(
 	"VLESS XHTTP TLS EXTRA|$linkTLS2"
 	"VLESS WS TLS|$linkTLS3"
 	"VLESS GRPC TLS|$linkTLS4"
+	"VLESS XHTTP SPLIT ↑REALITY ↓TLS (новое)|$linkSPLIT"
 )
 ALL_LINKS_TEXT=""
 
@@ -1061,7 +1095,10 @@ ${YEL}VLESS RAW REALITY VISION ${NC}
 $linkRTY1
 
 ${YEL}VLESS XHTTP TLS EXTRA ${NC}
-$linkRTY2
+$linkTLS2
+
+${YEL}VLESS XHTTP SPLIT ↑REALITY ↓TLS (новое) ${NC}
+$linkSPLIT
 
 ${YEL}Ваша json страничка подписки ${NC}
 $subPageLink

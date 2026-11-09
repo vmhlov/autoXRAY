@@ -107,16 +107,16 @@ if [ "$LOCAL_IP" != "$DNS_IP" ]; then
 fi
 
 
-# Включаем BBR
-bbr=$(sysctl -a | grep net.ipv4.tcp_congestion_control)
-if [ "$bbr" = "net.ipv4.tcp_congestion_control = bbr" ]; then
-    echo -e "${GRN}BBR уже запущен${NC}"
-else
-    echo "net.core.default_qdisc=fq" > /etc/sysctl.d/999-autoXRAY.conf
-    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.d/999-autoXRAY.conf
-    sysctl --system
-    echo -e "${GRN}BBR активирован${NC}"
-fi
+# BBR + отключение MPTCP (уязвимость ядра через IPv4 MPTCP listener,
+# см. https://github.com/XTLS/Xray-core/pull/7291). Отключение лишь снижает риск, ядро всё равно нужно обновить.
+{
+    echo "net.core.default_qdisc=fq"
+    echo "net.ipv4.tcp_congestion_control=bbr"
+    [ -e /proc/sys/net/mptcp/enabled ] && echo "net.mptcp.enabled=0"
+} > /etc/sysctl.d/999-autoXRAY.conf
+sysctl --system >/dev/null
+echo -e "${GRN}BBR: $(sysctl -n net.ipv4.tcp_congestion_control), MPTCP: $(sysctl -n net.mptcp.enabled 2>/dev/null || echo 'нет в ядре')${NC}"
+echo -e "${YEL}Ядро: $(uname -r). Регулярно обновляйте систему: apt-get update && apt-get full-upgrade -y && reboot${NC}"
 
 cat <<EOF > /etc/security/limits.d/99-autoXRAY.conf
 *               soft    nofile          65535
@@ -257,6 +257,15 @@ bash -c "$(curl -L https://github.com/xVRVx/autoXRAY/raw/refs/heads/main/test/ge
 
 # Установка Xray
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# v26.10.31 — срочный фикс MPTCP; более старые ядра Xray не ставим
+XRAY_MIN_VERSION="26.10.31"
+XRAY_VERSION=$(xray version 2>/dev/null | awk 'NR==1 {print $2}')
+if [ -z "$XRAY_VERSION" ] || [ "$(printf '%s\n' "$XRAY_MIN_VERSION" "$XRAY_VERSION" | sort -V | head -n1)" != "$XRAY_MIN_VERSION" ]; then
+    echo -e "${RED}❌ Xray ${XRAY_VERSION:-не установлен}: требуется версия >= $XRAY_MIN_VERSION${NC}"
+    exit 1
+fi
+echo -e "${GRN}Xray $XRAY_VERSION установлен${NC}"
 
 
 # Определяем директорию скрипта
@@ -464,8 +473,10 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
     {
       "tag": "direct",
       "protocol": "freedom",
-      "settings": {
-        "domainStrategy": "ForceIPv4"
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "ForceIPv4"
+        }
       }
     },
     {
@@ -494,7 +505,6 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
       {
         "domain": [
           "geosite:category-ads",
-          "geosite:win-spy",
           "geosite:private"
         ],
         "outboundTag": "block"
@@ -522,8 +532,6 @@ cat << 'EOF' | envsubst > "$SCRIPT_DIR/config.json"
           "geosite:yandex",
           "geosite:vk",
           "geosite:microsoft",
-          "geosite:win-update",
-          "geosite:win-extra",
           "geosite:google-play",
           "geosite:steam",
           "geosite:category-ru"
