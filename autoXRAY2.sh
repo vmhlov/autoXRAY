@@ -104,6 +104,10 @@ case $fp_choice in
     8) fpBro="qq" ;;
     *) fpBro="firefox" ;;
 esac
+
+read -p "$(echo -e "\n${YEL}Скрыть IP сервера: весь трафик пользователей выходит в интернет через Cloudflare WARP? (y/n, по умолчанию y): ${NC}")" choice_hide
+choice_hide=${choice_hide:-y}
+[[ "$choice_hide" =~ ^[Yy]$ ]] && HIDE_ENTRY_IP=true || HIDE_ENTRY_IP=false
 # ============================
 
 # Включаем BBR, MTU Probing и расширенные TCP-буферы ядра
@@ -833,6 +837,86 @@ HYSTERIA2='{
 systemctl restart xray
 echo -e "Перезапуск XRAY"
 
+# ==========================================
+# Скрытый IP входа. Серверы в РФ блокируют по IP за часы или дни. Вероятная причина:
+# приложения видят IP, с которого трафик выходит в интернет, а он совпадает с IP входа.
+# Здесь выход идёт через Cloudflare WARP (встроенный WireGuard Xray, без warp-cli),
+# и IP, к которому подключаются клиенты, никто не видит.
+# ==========================================
+EGRESS_STATUS="direct"
+WARP_ACCOUNT="$SCRIPT_DIR/warp-account.json"
+
+warp_register() {
+    local keys priv pub resp
+    keys=$(xray wg)
+    priv=$(echo "$keys" | awk -F': ' '/^PrivateKey/ {print $2}')
+    pub=$(echo "$keys" | awk -F': ' '/PublicKey/ {print $2}')
+    for _ in 1 2 3; do
+        resp=$(curl -s --max-time 20 -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
+            -H 'Content-Type: application/json' -H 'CF-Client-Version: a-6.30-2158' -H 'User-Agent: okhttp/3.12.1' \
+            -d "{\"key\":\"$pub\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$(date -u +%Y-%m-%dT%H:%M:%S.000Z)\",\"type\":\"Android\",\"locale\":\"en_US\"}")
+        if echo "$resp" | jq -e '.config.peers[0].public_key and .config.interface.addresses.v4 and .config.client_id' >/dev/null 2>&1; then
+            # client_id (base64) -> 3 байта reserved для WireGuard-рукопожатия с WARP
+            local reserved
+            reserved=$(echo "$resp" | jq -r '.config.client_id' | base64 -d | od -An -tu1 | tr -s ' ' | sed 's/^ //; s/ $//; s/ /,/g')
+            (umask 077; echo "$resp" | jq --arg sk "$priv" --argjson res "[$reserved]" '{
+                secretKey: $sk,
+                address: [(.config.interface.addresses.v4 + "/32"), (.config.interface.addresses.v6 + "/128")],
+                peerPublicKey: .config.peers[0].public_key,
+                endpoint: .config.peers[0].endpoint.host,
+                reserved: $res
+            }' > "$WARP_ACCOUNT")
+            return 0
+        fi
+        sleep 3
+    done
+    return 1
+}
+
+egress_check() {
+    curl -s --max-time 20 -x "socks5h://${socksUser}:${socksPasw}@127.0.0.1:10443" https://www.cloudflare.com/cdn-cgi/trace
+}
+
+if [ "$HIDE_ENTRY_IP" = true ]; then
+    echo -e "\n${YEL}Настройка скрытого IP входа (выход через WARP)...${NC}"
+    if [ -s "$WARP_ACCOUNT" ] || warp_register; then
+        warp_out=$(jq '{
+            tag: "warp", protocol: "wireguard",
+            settings: {
+                secretKey: .secretKey, address: .address, mtu: 1280, noKernelTun: true, reserved: .reserved,
+                peers: [ { publicKey: .peerPublicKey, endpoint: .endpoint, allowedIPs: ["0.0.0.0/0", "::/0"] } ]
+            }
+        }' "$WARP_ACCOUNT")
+        # Первый outbound получает весь трафик, не попавший под правила; заменяет socks-заглушку warp-cli
+        jq --argjson w "$warp_out" '.outbounds = [$w] + [.outbounds[] | select(.tag != "warp")]' \
+            "$SCRIPT_DIR/config.json" > "$SCRIPT_DIR/config.warp.json"
+        if xray run -test -config "$SCRIPT_DIR/config.warp.json" >/dev/null 2>&1; then
+            mv "$SCRIPT_DIR/config.warp.json" "$SCRIPT_DIR/config.json"
+            chown root:xray "$SCRIPT_DIR/config.json"
+            chmod 640 "$SCRIPT_DIR/config.json"
+            systemctl restart xray
+            sleep 3
+            if egress_check | grep -q '^warp=on'; then
+                EGRESS_STATUS="warp"
+            else
+                # WARP не отвечает: возвращаем прямой выход, чтобы VPN продолжал работать
+                jq '.outbounds = [.outbounds[] | select(.tag == "direct")] + [.outbounds[] | select(.tag != "direct")]' \
+                    "$SCRIPT_DIR/config.json" > "$SCRIPT_DIR/config.warp.json" && mv "$SCRIPT_DIR/config.warp.json" "$SCRIPT_DIR/config.json"
+                chown root:xray "$SCRIPT_DIR/config.json"
+                chmod 640 "$SCRIPT_DIR/config.json"
+                systemctl restart xray
+            fi
+        else
+            rm -f "$SCRIPT_DIR/config.warp.json"
+        fi
+    fi
+    if [ "$EGRESS_STATUS" = "warp" ]; then
+        echo -e "${GRN}✅ IP входа скрыт: сайты видят адрес Cloudflare WARP, а не $LOCAL_IP${NC}"
+    else
+        echo -e "${RED}❌ WARP не заработал, трафик выходит напрямую с IP сервера ($LOCAL_IP)${NC}"
+    fi
+fi
+
 # Формирование ссылок
 subPageLink="https://$DOMAIN/$path_subpage.json"
 
@@ -980,6 +1064,12 @@ if systemctl is-active --quiet xray; then
     echo -e "XRAY: ${GRN}RUNNING${NC}"
 else
     echo -e "XRAY: ${RED}STOPPED/ERROR${NC}"
+fi
+
+if [ "$EGRESS_STATUS" = "warp" ]; then
+    echo -e "Выход в интернет: ${GRN}WARP (IP сервера скрыт)${NC}"
+else
+    echo -e "Выход в интернет: ${YEL}напрямую с IP сервера${NC}"
 fi
 
 echo -e "\n"
