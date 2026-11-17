@@ -12,6 +12,7 @@
 5. `aegis-ru-entry.sh` — EU: встраивает RU-мост в AEGIS AUTO (RU-трафик всегда с RU-IP), профиль RU ENTRY.
 6. `aegis-probe.py` — RU: разведка канала (какие протоколы проходят, асимметрия, штрафная скамейка).
 7. `aegis-pulse.sh` — RU-мост: монитор заморозки/блокировки (provocate >20KB), JSON-лог, алерт, таймер 120с.
+8. `aegis-imap-lane.sh` — EU: аварийный IMAP-relay через mail.ru (true-imap-tunnel v0.5.0), профиль для десктопа. Провайдер: Mail.ru лучший; Yandex-почта медленная/отваливается.
 
 ## Статус проверки
 - Машинно проверено (bash -n / py_compile / JSON / логика): upgrade, bridge, ru-entry, gdrive, ydisk, probe, pulse.
